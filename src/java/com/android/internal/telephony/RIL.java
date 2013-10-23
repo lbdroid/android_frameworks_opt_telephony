@@ -34,6 +34,7 @@ import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.res.Resources;
 import android.hardware.display.DisplayManager;
+import android.content.res.Resources;
 import android.net.ConnectivityManager;
 import android.net.LocalSocket;
 import android.net.LocalSocketAddress;
@@ -230,8 +231,10 @@ class RILRequest {
  */
 public class RIL extends BaseCommands implements CommandsInterface {
     static final String RILJ_LOG_TAG = "RILJ";
+    static final String LOG_TAG = RILJ_LOG_TAG;
     static final boolean RILJ_LOGD = true;
     static final boolean RILJ_LOGV = false; // STOPSHIP if true
+    protected boolean samsungDriverCall = false;
 
     /**
      * Wake lock timeout should be longer than the longest timeout in
@@ -281,7 +284,6 @@ public class RIL extends BaseCommands implements CommandsInterface {
     AtomicBoolean mTestingEmergencyCall = new AtomicBoolean(false);
 
     protected Integer mInstanceId;
-
     // Number of per-network elements expected in QUERY_AVAILABLE_NETWORKS's response.
     // 4 elements is default, but many RILs actually return 5, making it impossible to
     // divide the response array without prior knowledge of the number of elements.
@@ -634,8 +636,6 @@ public class RIL extends BaseCommands implements CommandsInterface {
         }
     }
 
-
-
     //***** Constructors
 
     public RIL(Context context, int preferredNetworkType, int cdmaSubscription) {
@@ -853,7 +853,7 @@ public class RIL extends BaseCommands implements CommandsInterface {
         supplyIccPin2ForApp(pin, null, result);
     }
 
-    @Override public void
+     @Override public void
     supplyIccPin2ForApp(String pin, String aid, Message result) {
         //Note: This RIL request has not been renamed to ICC,
         //       but this request is also valid for SIM and RUIM
@@ -2520,7 +2520,8 @@ public class RIL extends BaseCommands implements CommandsInterface {
             case 7:
             case 8:
             case 9:
-            case 10: state = RadioState.RADIO_ON; break;
+            case 10:
+            case 13: state = RadioState.RADIO_ON; break;
 
             default:
                 throw new RuntimeException(
@@ -3814,6 +3815,8 @@ public class RIL extends BaseCommands implements CommandsInterface {
             dc.als = p.readInt();
             voiceSettings = p.readInt();
             dc.isVoice = (0 == voiceSettings) ? false : true;
+            if(samsungDriverCall)
+                 p.readInt();
             dc.isVoicePrivacy = (0 != p.readInt());
             dc.number = p.readString();
             int np = p.readInt();
@@ -3888,7 +3891,7 @@ public class RIL extends BaseCommands implements CommandsInterface {
             if (needsOldRilFeature("usehcradio"))
                 dataCall.suggestedRetryTime = -1;
             else
-	      dataCall.suggestedRetryTime = p.readInt();
+              dataCall.suggestedRetryTime = p.readInt();
             dataCall.cid = p.readInt();
             dataCall.active = p.readInt();
             dataCall.type = p.readString();
