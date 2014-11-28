@@ -636,17 +636,6 @@ public class RIL extends BaseCommands implements CommandsInterface {
         }
     }
 
-    /* use the cm implementation for getting ril features */
-    @Override
-    public boolean needsOldRilFeature(String feature) {
-        String[] features = SystemProperties.get("ro.telephony.ril.v3", "").split(",");
-        for (String found: features) {
-            if (found.equals(feature))
-                return true;
-        }
-        return false;
-    }
-
     //***** Constructors
 
     public RIL(Context context, int preferredNetworkType, int cdmaSubscription) {
