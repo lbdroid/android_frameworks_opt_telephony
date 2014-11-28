@@ -19,6 +19,8 @@ package com.android.internal.telephony;
 import java.util.Collections;
 import java.util.Map;
 import java.util.HashMap;
+import android.os.Environment;
+import android.telephony.Rlog;
 
 public class Operators{
 
@@ -1523,10 +1525,69 @@ public class Operators{
         operators = Collections.unmodifiableMap(init);
     }
 
+    //this will stay persistant in memory when called
+    private static String stored = null;
+    private static String storedOperators = null;
+
     public static String operatorReplace(String response){
-        if(operators == null){
-            initList();
+        // sanity checking if the value is actually not equal to the range apn
+        // numerics
+        // if it is null, check your ril class.
+        if(response == null || (5 != response.length() && response.length() != 6)){
+            return response;
         }
-        return operators.containsKey(response) ? operators.get(response) : response;
+        // this will check if the stored value is equal to other.
+        // this uses a technique called last known of good value.
+        // along with sanity checking
+        if(storedOperators != null && stored != null && stored.equals(response)){
+            return storedOperators;
+        }
+        stored = response;
+        try {
+            // this will find out if it a number then it will catch it based
+            // on invalid chars.
+            Integer.parseInt(response);
+        } catch(NumberFormatException E){
+            // not a number, pass it along to stored operator until the next
+            // round.
+            storedOperators = response;
+            return storedOperators;
+        }
+        // this code will be taking care of when garbage collection start
+        Operators init = new Operators();
+        Map<String, String> operators = init.initList();
+        storedOperators = operators.containsKey(response) ? operators.get(response) : response;
+        return storedOperators;
+    }
+
+    // this will not stay persistant in memory, this will be taken care of
+    // iin garbage collection routiene.
+    private Map<String, String> unOptOperators = null;
+    // unoptimized version of operatorreplace for responseOperatorInfos
+    // this will provide a little more flexiblilty in a loop like sisuation
+    // same numbers of checks like before
+    // this is for the search network functionality
+    public String unOptimizedOperatorReplace(String response){
+        // sanity checking if the value is actually not equal to the range apn
+        // numerics
+        // if it is null, check your ril class.
+        if(response == null || (5 != response.length() && response.length() != 6)){
+            return response;
+        }
+
+        try {
+            // this will find out if it a number then it will catch it based
+            // on invalid chars.
+            Integer.parseInt(response);
+        } catch(NumberFormatException E){
+            // an illegal char is found i.e a word
+            return response;
+        }
+
+        if (unOptOperators == null){
+            unOptOperators = initList();
+        }
+
+        return unOptOperators.containsKey(response) ? unOptOperators.get(response) : response;
     }
 }
