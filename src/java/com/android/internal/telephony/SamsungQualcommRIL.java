@@ -72,6 +72,10 @@ public class SamsungQualcommRIL extends QualcommMSIM42RIL implements CommandsInt
     private boolean googleEditionSS = needsOldRilFeature("googleEditionSS");
     private boolean driverCall = needsOldRilFeature("newDriverCall");
     private String[] lastKnownOfGood = {null, null, null};
+    public SamsungQualcommRIL(Context context, int preferredNetworkType,
+            int cdmaSubscription, Integer instanceId) {
+        this(context, preferredNetworkType, cdmaSubscription);
+    }
     public SamsungQualcommRIL(Context context, int networkMode,
             int cdmaSubscription) {
         super(context, networkMode, cdmaSubscription);
