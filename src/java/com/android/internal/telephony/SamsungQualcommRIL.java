@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2012-2013 The CyanogenMod Project
+ * Copyright (C) 2012-2014 The CyanogenMod Project
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -57,21 +57,20 @@ import com.android.internal.telephony.uicc.IccCardStatus;
  * Handles most GSM and CDMA cases.
  * {@hide}
  */
-public class SamsungQualcommRIL extends QualcommMSIM42RIL implements CommandsInterface {
+public class SamsungQualcommRIL extends RIL implements CommandsInterface {
 
     private AudioManager mAudioManager;
 
     private Object mSMSLock = new Object();
     private boolean mIsSendingSMS = false;
-    private boolean isGSM = false;
-    private boolean passedCheck=true;
+    protected boolean isGSM = false;
     public static final long SEND_SMS_TIMEOUT_IN_MS = 30000;
-    private String homeOperator= SystemProperties.get("ro.cdma.home.operator.numeric");
-    private String operator= SystemProperties.get("ro.cdma.home.operator.alpha");
     private boolean oldRilState = needsOldRilFeature("exynos4RadioState");
     private boolean googleEditionSS = needsOldRilFeature("googleEditionSS");
     private boolean driverCall = needsOldRilFeature("newDriverCall");
-    private String[] lastKnownOfGood = {null, null, null};
+    private boolean driverCallU = needsOldRilFeature("newDriverCallU");
+    private boolean dialCode = needsOldRilFeature("newDialCode");
+    private boolean samsungEmergency = needsOldRilFeature("samsungEMSReq");
     public SamsungQualcommRIL(Context context, int preferredNetworkType,
             int cdmaSubscription, Integer instanceId) {
         this(context, preferredNetworkType, cdmaSubscription);
@@ -80,6 +79,7 @@ public class SamsungQualcommRIL extends QualcommMSIM42RIL implements CommandsInt
             int cdmaSubscription) {
         super(context, networkMode, cdmaSubscription);
         mAudioManager = (AudioManager)mContext.getSystemService(Context.AUDIO_SERVICE);
+        mQANElements = SystemProperties.getInt("ro.ril.telephony.mqanelements", 4);
     }
 
     @Override
@@ -101,13 +101,12 @@ public class SamsungQualcommRIL extends QualcommMSIM42RIL implements CommandsInt
             numApplications = IccCardStatus.CARD_MAX_APPS;
         }
         cardStatus.mApplications = new IccCardApplicationStatus[numApplications];
-        if (numApplications==1 && !isGSM){
-            cardStatus.mApplications = new IccCardApplicationStatus[numApplications+2];
-        }
 
         appStatus = new IccCardApplicationStatus();
         for (int i = 0 ; i < numApplications ; i++) {
-            appStatus = new IccCardApplicationStatus();
+            if (i!=0) {
+                appStatus = new IccCardApplicationStatus();
+            }
             appStatus.app_type       = appStatus.AppTypeFromRILInt(p.readInt());
             appStatus.app_state      = appStatus.AppStateFromRILInt(p.readInt());
             appStatus.perso_substate = appStatus.PersoSubstateFromRILInt(p.readInt());
@@ -123,7 +122,10 @@ public class SamsungQualcommRIL extends QualcommMSIM42RIL implements CommandsInt
             p.readInt(); // - perso_unblock_retries
             cardStatus.mApplications[i] = appStatus;
         }
-        if (numApplications==1 && !isGSM) {
+        if (numApplications==1 && !isGSM && appStatus.app_type == appStatus.AppTypeFromRILInt(2)) { // usim
+            cardStatus.mApplications = new IccCardApplicationStatus[numApplications+2];
+            cardStatus.mGsmUmtsSubscriptionAppIndex = 0;
+            cardStatus.mApplications[cardStatus.mGsmUmtsSubscriptionAppIndex]=appStatus;
             cardStatus.mCdmaSubscriptionAppIndex = 1;
             cardStatus.mImsSubscriptionAppIndex = 2;
             IccCardApplicationStatus appStatus2 = new IccCardApplicationStatus();
@@ -212,10 +214,12 @@ public class SamsungQualcommRIL extends QualcommMSIM42RIL implements CommandsInt
         // RIL_LTE_SignalStrength
         if (googleEditionSS && !isGSM){
             response[8] = response[2];
-        }else if (response[7] == 99) {
+        }else if ((response[7] & 0xff) == 255 || response[7] == 99) {
             // If LTE is not enabled, clear LTE results
             // 7-11 must be -1 for GSM signal strength to be used (see
             // frameworks/base/telephony/java/android/telephony/SignalStrength.java)
+            // make sure lte is disabled
+            response[7] = 99;
             response[8] = SignalStrength.INVALID;
             response[9] = SignalStrength.INVALID;
             response[10] = SignalStrength.INVALID;
@@ -223,6 +227,7 @@ public class SamsungQualcommRIL extends QualcommMSIM42RIL implements CommandsInt
         }else{ // lte is gsm on samsung/qualcomm cdma stack
             response[7] &= 0xff;
         }
+
         return new SignalStrength(response[0], response[1], response[2], response[3], response[4], response[5], response[6], response[7], response[8], response[9], response[10], response[11], (p.readInt() != 0));
 
     }
@@ -230,7 +235,7 @@ public class SamsungQualcommRIL extends QualcommMSIM42RIL implements CommandsInt
     @Override
     protected RadioState getRadioStateFromInt(int stateInt) {
         if(!oldRilState)
-            super.getRadioStateFromInt(stateInt);
+             return super.getRadioStateFromInt(stateInt);
         RadioState state;
 
         /* RIL_RadioState ril.h */
@@ -267,13 +272,83 @@ public class SamsungQualcommRIL extends QualcommMSIM42RIL implements CommandsInt
         isGSM = (phoneType != RILConstants.CDMA_PHONE);
     }
 
-    @Override
     protected Object
     responseCallList(Parcel p) {
-        samsungDriverCall = (driverCall && !isGSM) || mRilVersion < 7 ? false : true;
-        if(driverCall && passedCheck)
-            mAudioManager.setParameters("wide_voice_enable=false");
-        return super.responseCallList(p);
+        int num;
+        int voiceSettings;
+        ArrayList<DriverCall> response;
+        DriverCall dc;
+
+        num = p.readInt();
+        response = new ArrayList<DriverCall>(num);
+
+        if (RILJ_LOGV) {
+            riljLog("responseCallList: num=" + num +
+                    " mEmergencyCallbackModeRegistrant=" + mEmergencyCallbackModeRegistrant +
+                    " mTestingEmergencyCall=" + mTestingEmergencyCall.get());
+        }
+        for (int i = 0 ; i < num ; i++) {
+            dc = new DriverCall();
+
+            dc.state = DriverCall.stateFromCLCC(p.readInt());
+            dc.index = p.readInt();
+            dc.TOA = p.readInt();
+            dc.isMpty = (0 != p.readInt());
+            dc.isMT = (0 != p.readInt());
+            dc.als = p.readInt();
+            voiceSettings = p.readInt();
+            dc.isVoice = (0 == voiceSettings) ? false : true;
+            if(driverCallU || (driverCall && !isGSM) || mRilVersion < 7 ? false : true)
+                 p.readInt();
+            dc.isVoicePrivacy = (0 != p.readInt());
+            dc.number = p.readString();
+            int np = p.readInt();
+            dc.numberPresentation = DriverCall.presentationFromCLIP(np);
+            dc.name = p.readString();
+            dc.namePresentation = p.readInt();
+            int uusInfoPresent = p.readInt();
+            if (uusInfoPresent == 1) {
+                dc.uusInfo = new UUSInfo();
+                dc.uusInfo.setType(p.readInt());
+                dc.uusInfo.setDcs(p.readInt());
+                byte[] userData = p.createByteArray();
+                dc.uusInfo.setUserData(userData);
+                riljLogv(String.format("Incoming UUS : type=%d, dcs=%d, length=%d",
+                                dc.uusInfo.getType(), dc.uusInfo.getDcs(),
+                                dc.uusInfo.getUserData().length));
+                riljLogv("Incoming UUS : data (string)="
+                        + new String(dc.uusInfo.getUserData()));
+                riljLogv("Incoming UUS : data (hex): "
+                        + IccUtils.bytesToHexString(dc.uusInfo.getUserData()));
+            } else {
+                riljLogv("Incoming UUS : NOT present!");
+            }
+
+            // Make sure there's a leading + on addresses with a TOA of 145
+            dc.number = PhoneNumberUtils.stringFromStringAndTOA(dc.number, dc.TOA);
+
+            response.add(dc);
+
+            if (dc.isVoicePrivacy) {
+                mVoicePrivacyOnRegistrants.notifyRegistrants();
+                riljLog("InCall VoicePrivacy is enabled");
+            } else {
+                mVoicePrivacyOffRegistrants.notifyRegistrants();
+                riljLog("InCall VoicePrivacy is disabled");
+            }
+        }
+
+        Collections.sort(response);
+
+        if ((num == 0) && mTestingEmergencyCall.getAndSet(false)) {
+            if (mEmergencyCallbackModeRegistrant != null) {
+                riljLog("responseCallList: call ended, testing emergency call," +
+                            " notify ECM Registrants");
+                mEmergencyCallbackModeRegistrant.notifyRegistrant();
+            }
+        }
+
+        return response;
     }
 
     @Override
@@ -289,11 +364,9 @@ public class SamsungQualcommRIL extends QualcommMSIM42RIL implements CommandsInt
                 ret = responseInts(p);
                 setRadioPower(false, null);
                 setPreferredNetworkType(mPreferredNetworkType, null);
-                int cdmaSubscription = Settings.Global.getInt(mContext.getContentResolver(), Settings.Global.CDMA_SUBSCRIPTION_MODE, -1);
-                if(cdmaSubscription != -1) {
-                    setCdmaSubscriptionSource(mCdmaSubscription, null);
-                }
-                setCellInfoListRate(Integer.MAX_VALUE, null);
+                setCdmaSubscriptionSource(mCdmaSubscription, null);
+                if(mRilVersion >= 8)
+                    setCellInfoListRate(Integer.MAX_VALUE, null);
                 notifyRegistrantsRilConnectionChanged(((int[])ret)[0]);
                 break;
             case RIL_UNSOL_NITZ_TIME_RECEIVED:
@@ -349,7 +422,7 @@ public class SamsungQualcommRIL extends QualcommMSIM42RIL implements CommandsInt
         if (rr == null) {
             Rlog.w(RILJ_LOG_TAG, "Unexpected solicited response! sn: "
                             + serial + " error: " + error);
-            return rr;
+            return null;
         }
 
         Object ret = null;
@@ -490,6 +563,9 @@ public class SamsungQualcommRIL extends QualcommMSIM42RIL implements CommandsInt
             case RIL_REQUEST_VOICE_RADIO_TECH: ret = responseInts(p); break;
             case RIL_REQUEST_GET_CELL_INFO_LIST: ret = responseCellInfoList(p); break;
             case RIL_REQUEST_SET_UNSOL_CELL_INFO_LIST_RATE: ret = responseVoid(p); break;
+            case RIL_REQUEST_SET_INITIAL_ATTACH_APN: ret = responseVoid(p); break;
+            case RIL_REQUEST_IMS_REGISTRATION_STATE: ret = responseInts(p); break;
+            case RIL_REQUEST_IMS_SEND_SMS: ret =  responseSMS(p); break;
             default:
                 throw new RuntimeException("Unrecognized solicited response: " + rr.mRequest);
             //break;
@@ -504,7 +580,6 @@ public class SamsungQualcommRIL extends QualcommMSIM42RIL implements CommandsInt
                     AsyncResult.forMessage(rr.mResult, null, tr);
                     rr.mResult.sendToTarget();
                 }
-                rr.release();
                 return rr;
             }
         }
@@ -543,19 +618,16 @@ public class SamsungQualcommRIL extends QualcommMSIM42RIL implements CommandsInt
             }
 
             rr.onError(error, ret);
-            rr.release();
-            return rr;
+        } else {
+
+            if (RILJ_LOGD) riljLog(rr.serialString() + "< " + requestToString(rr.mRequest)
+                    + " " + retToString(rr.mRequest, ret));
+
+            if (rr.mResult != null) {
+                AsyncResult.forMessage(rr.mResult, ret, null);
+                rr.mResult.sendToTarget();
+            }
         }
-
-        if (RILJ_LOGD) riljLog(rr.serialString() + "< " + requestToString(rr.mRequest)
-            + " " + retToString(rr.mRequest, ret));
-
-        if (rr.mResult != null) {
-            AsyncResult.forMessage(rr.mResult, ret, null);
-            rr.mResult.sendToTarget();
-        }
-
-        rr.release();
         return rr;
     }
 
@@ -563,29 +635,9 @@ public class SamsungQualcommRIL extends QualcommMSIM42RIL implements CommandsInt
     private Object
     operatorCheck(Parcel p) {
         String response[] = (String[])responseStrings(p);
-        for(int i=0; i<3; i++){
+        for(int i=0; i<2; i++){
             if (response[i]!= null){
-                if (i<2){
-                    if (response[i].equals("       Empty") || (response[i].equals("") && !isGSM)) {
-                        response[i]=operator;
-                    } else if (!response[i].equals(""))  {
-                        try {
-                            Integer.parseInt(response[i]);
-                            response[i]=Operators.operatorReplace(response[i]);
-                            //optimize
-                            if(i==0)
-                                response[i+1]=response[i];
-                        }  catch(NumberFormatException E){
-                            // do nothing
-                        }
-                    }
-                } else if (response[i].equals("31000")|| response[i].equals("11111") || response[i].equals("123456") || response[i].equals("31099") || (response[i].equals("") && !isGSM)){
-                        response[i]=homeOperator;
-                }
-                lastKnownOfGood[i]=response[i];
-            }else{
-                if(lastKnownOfGood[i]!=null)
-                    response[i]=lastKnownOfGood[i];
+                response[i] = Operators.operatorReplace(response[i]);
             }
         }
         return response;
@@ -639,12 +691,9 @@ public class SamsungQualcommRIL extends QualcommMSIM42RIL implements CommandsInt
             Rlog.d(RILJ_LOG_TAG, "setWbAmr(): setting audio parameter - wb_amr=on");
             mAudioManager.setParameters("wide_voice_enable=true");
         }else if (state == 0) {
-            Rlog.d(RILJ_LOG_TAG, "setWbAmr(): setting audio parameter - wb_amr=on");
+            Rlog.d(RILJ_LOG_TAG, "setWbAmr(): setting audio parameter - wb_amr=off");
             mAudioManager.setParameters("wide_voice_enable=false");
         }
-        //prevent race conditions when the two meeets
-        if (passedCheck)
-            passedCheck=false;
     }
 
     // Workaround for Samsung CDMA "ring of death" bug:
@@ -751,5 +800,100 @@ public class SamsungQualcommRIL extends QualcommMSIM42RIL implements CommandsInt
         }
 
         return super.responseSMS(p);
+    }
+
+    @Override
+    public void
+    dial(String address, int clirMode, UUSInfo uusInfo, Message result) {
+        if (samsungEmergency && PhoneNumberUtils.isEmergencyNumber(address)) {
+            dialEmergencyCall(address, clirMode, result);
+            return;
+        }
+        if(!dialCode){
+            super.dial(address, clirMode, uusInfo, result);
+            return;
+        }
+        RILRequest rr = RILRequest.obtain(RIL_REQUEST_DIAL, result);
+
+        rr.mParcel.writeString(address);
+        rr.mParcel.writeInt(clirMode);
+        rr.mParcel.writeInt(0);
+        rr.mParcel.writeInt(1);
+        rr.mParcel.writeString("");
+
+        if (uusInfo == null) {
+            rr.mParcel.writeInt(0); // UUS information is absent
+        } else {
+            rr.mParcel.writeInt(1); // UUS information is present
+            rr.mParcel.writeInt(uusInfo.getType());
+            rr.mParcel.writeInt(uusInfo.getDcs());
+            rr.mParcel.writeByteArray(uusInfo.getUserData());
+        }
+
+        if (RILJ_LOGD) riljLog(rr.serialString() + "> " + requestToString(rr.mRequest));
+
+        send(rr);
+    }
+
+    //this method is used in the search network functionality.
+    // in mobile network setting-> network operators
+    @Override
+    protected Object
+    responseOperatorInfos(Parcel p) {
+        String strings[] = (String [])responseStrings(p);
+        ArrayList<OperatorInfo> ret;
+
+        if (strings.length % mQANElements != 0) {
+            throw new RuntimeException(
+                                       "RIL_REQUEST_QUERY_AVAILABLE_NETWORKS: invalid response. Got "
+                                       + strings.length + " strings, expected multiple of " + mQANElements);
+        }
+
+        ret = new ArrayList<OperatorInfo>(strings.length / mQANElements);
+        Operators init = null;
+        if (strings.length != 0) {
+            init = new Operators();
+        }
+        for (int i = 0 ; i < strings.length ; i += mQANElements) {
+            String temp = init.unOptimizedOperatorReplace(strings[i+0]);
+            ret.add (
+                     new OperatorInfo(
+                                      temp, //operatorAlphaLong
+                                      temp,//operatorAlphaShort
+                                      strings[i+2],//operatorNumeric
+                                      strings[i+3]));//state
+        }
+
+        return ret;
+    }
+
+    @Override
+    public void getImsRegistrationState(Message result) {
+        if(mRilVersion >= 8)
+            super.getImsRegistrationState(result);
+        else {
+            if (result != null) {
+                CommandException ex = new CommandException(
+                    CommandException.Error.REQUEST_NOT_SUPPORTED);
+                AsyncResult.forMessage(result, null, ex);
+                result.sendToTarget();
+            }
+        }
+    }
+
+    static final int RIL_REQUEST_DIAL_EMERGENCY = 10016;
+    public void
+    dialEmergencyCall(String address, int clirMode, Message result) {
+        RILRequest rr;
+        Rlog.v(RILJ_LOG_TAG, "Emergency dial: " + address);
+
+        rr = RILRequest.obtain(RIL_REQUEST_DIAL_EMERGENCY, result);
+        rr.mParcel.writeString(address + "/");
+        rr.mParcel.writeInt(clirMode);
+        rr.mParcel.writeInt(0);  // UUS information is absent
+
+        if (RILJ_LOGD) riljLog(rr.serialString() + "> " + requestToString(rr.mRequest));
+
+        send(rr);
     }
 }
